@@ -1,0 +1,778 @@
+---
+title: "Bayesian Principles applied to Legislative Votes"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(rethinking)
+source("../../../GitHub/ARM2_final/scripts/leg_data.R")
+
+#for one sample legislator, Senator Hunt
+huntbills <- sponsor_record %>% 
+  filter(original_sponsor == "Hunt")
+
+
+passed <- sum(huntbills$`1`)
+totbills <- sum(huntbills$tot_bills)
+
+p_grid <- seq( from=0 , to=1 , length.out=1000 )
+prob_p <- rep( 1 , 1000 )
+prob_data <- dbinom( passed , size=totbills , prob=p_grid )
+posterior <- prob_data * prob_p
+posterior <- posterior / sum(posterior)
+
+plot( p_grid , posterior , type="b" ,
+    xlab="probability of bill passing" , ylab="posterior probability" )
+
+
+```
+
+
+
+```{r}
+#Sampling from the posterior
+samples <- sample( p_grid , prob=posterior , size=1e4 , replace=TRUE )
+plot(samples)
+dens( samples ) #fn from rethinking
+```
+
+
+Using sampling to summarize the posterior
+
+These simple questions can be usefully divided into questions about (1) intervals of defined boundaries, (2) questions about intervals of defined probability mass, and (3) questions about point estimates. We’ll see how to approach these questions using samples from the posterior.
+
+```{r}
+ # add up posterior probability where p < 0.19
+sum( posterior[ p_grid < 0.19 ] ) #this is directly from grid approx. and won't scale
+```
+
+
+
+```{r}
+#posterior probability using samples
+sum( samples < 0.19 ) / 1e4 #frequency of sampled parameter values below 0.19
+```
+
+
+```{r}
+#between two points
+sum( samples > 0.1 & samples < 0.2 ) / 1e4
+```
+
+
+
+It is more common to see scientific journals reporting an interval of defined mass, usually known as a confidence interval. An interval of posterior probability, such as the ones we are working with, may instead be called a credible interval, although the terms may also be used interchangeably, in the usual polysemy that arises when commonplace words are used in technical definitions. -- basically inverse of above, defining % and finding the range
+
+```{r}
+#lower 80 percent range
+quantile( samples , 0.8 )
+```
+
+```{r}
+#middle 80 percent range *percentile interval*
+quantile( samples , c( 0.1 , 0.9 ) )
+```
+
+```{r}
+#PI func from rethinking
+ PI( samples , prob=0.5 )
+```
+
+```{r}
+#highest posterior density interval (HPDI) contains the narrowest possible band of specified probability mass
+ HPDI( samples , prob=0.5 )
+```
+
+
+
+Overall, if the choice of interval type makes a big difference, then you shouldn’t be us- ing intervals to summarize the posterior. Remember, the entire posterior distribution is the Bayesian “estimate.” It summarizes the relative plausibilities of each possible value of the parameter. Intervals of the distribution are just helpful for summarizing it. If choice of in- terval leads to different inferences, then you’d be better off just plotting the entire posterior distribution.
+
+Rethinking: What do confidence intervals mean? It is common to hear that a 95% confidence inter- val means that there is a probability 0.95 that the true parameter value lies within the interval. In strict non-Bayesian statistical inference, such a statement is never correct, because strict non-Bayesian in- ference forbids using probability to measure uncertainty about parameters. Instead, one should say that if we repeated the study and analysis a very large number of times, then 95% of the computed in- tervals would contain the true parameter value. If the distinction is not entirely clear to you, then you are in good company. Most scientists find the definition of a confidence interval to be bewildering, and many of them slip unconsciously into a Bayesian interpretation.
+But whether you use a Bayesian interpretation or not, a 95% interval does not contain the true value 95% of the time. The history of science teaches us that confidence intervals exhibit chronic overconfidence.55 Thewordtrueshouldsetoffalarmsthatsomethingiswrongwithastatementlike “contains the true value.” The 95% is a small world number (see the introduction to Chapter 2), only true in the model’s logical world. So it will never apply exactly to the real or large world. It is what the golem believes, but you are free to believe something else. Regardless, the width of the interval, and the values it covers, can provide valuable advice.
+
+
+
+
+a maximum a posteriori (MAP) estimate. You can easily compute the MAP in this example:
+```{r}
+ p_grid[ which.max(posterior) ] #for grid approximation
+ chainmode( samples , adj=0.01 ) #using mode (same as MAP)
+ mean( samples )
+median( samples )
+```
+
+One principled way to go beyond using the entire posterior as the estimate is to choose a loss function. A loss function is a rule that tells you the cost associated with using any particular point estimate. While statisticians and game theorists have long been interested in loss functions, and how Bayesian inference supports them, scientists hardly ever use them explicitly. The key insight is that different loss functions imply different point estimates.
+Here’s an example to help us work through the procedure. Suppose I offer you a bet. Tell me which value of p, the proportion of water on the Earth, you think is correct. I will pay you $100, if you get it exactly right. But I will subtract money from your gain, proportional to the distance of your decision from the correct value. Precisely, your loss is proportional to the absolute value of d − p, where d is your decision and p is the correct answer. We could change the precise dollar values involved, without changing the important aspects of this problem. What matters is that the loss is proportional to the distance of your decision from the true value.
+Now once you have the posterior distribution in hand, how should you use it to maxi- mize your expected winnings? It turns out that the parameter value that maximizes expected winnings (minimizes expected loss) is the median of the posterior distribution.
+
+
+
+```{r}
+#loss fn
+ loss <- sapply( p_grid , function(d) sum( posterior*abs( d - p_grid ) ) )
+  p_grid[ which.min(loss) ] #same as median in this case
+```
+
+Different loss functions nominate different point estimates. The two most common examples are the absolute loss as above, which leads to the median as the point estimate, and the quadratic loss (d − p)2, which leads to the posterior mean (mean(samples)) as the point estimate. When the posterior distribution is symmetrical and normal-looking, then the median and mean converge to the same point, which relaxes some anxiety we might have about choosing a loss function. For the original globe tossing data (6 waters in 9 tosses), for example, the mean and median are barely different.
+In principle, though, the details of the applied context may demand a rather unique loss function. Consider a practical example like deciding whether or not to order an evacuation, based upon an estimate of hurricane wind speed. Damage to life and property increases very rapidly as wind speed increases. There are also costs to ordering an evacuation when none is needed, but these are much smaller. Therefore the implied loss function is highly asymmetric, rising sharply as true wind speed exceeds our guess, but rising only slowly as true wind speed falls below our guess. In this context, the optimal point estimate would tend to be larger than posterior mean or median. Moreover, the real issue is whether or not to order an evacuation, and so producing a point estimate of wind speed may not be necessary at all.
+
+
+Bayesian models are always generative, capable of simulating predictions. Many non-Bayesian models are also generative, but many are not.
+We will call such simulated data dummy data, to indicate that it is a stand-in for actual data. With the globe tossing model, the dummy data arises from a binomial likelihood:
+
+```{r}
+#dummy data
+ dbinom( 0:2 , size=2 , prob=0.2 ) #simulating data for 2 bills, with true prob = 0.2. This means that with 2 trials, there is a 64% chance of no bills passing, a 32% chance of 1 bill passing, and a 4% chance of both bills passing if the true prob is 20%
+```
+
+
+```{r}
+#now to simulate observations using the above probabilities. 2 bills, 1e5 times, how many pass each trial?
+dummy_data <- rbinom(1e5 , size=2 , prob=0.2)
+table(dummy_data)/1e5
+```
+
+```{r}
+#now simulate trials with 9 bills introduced
+dummy_data <- rbinom( 1e5 , size=9 , prob=0.2 )
+simplehist( dummy_data , xlab="dummy bill count" )
+```
+
+
+
+We’d like to propagate the parameter uncertainty—carry it forward—as we evaluate the implied predictions. All that is required is averaging over the posterior density for p, while computing the predictions. For each possible value of the parameter p, there is an implied distribution of outcomes. So if you were to compute the sampling distribution of outcomes at each value of p, then you could average all of these prediction distributions together, using the posterior probabilities of each value of p, to get a posterior predictive distribution.
+
+```{r}
+#simulate predicted observations for a single value of p, for 9 bills, predictions stored as bills passed
+ w <- rbinom( 1e4 , size=9 , prob=0.2 )
+ 
+#to propogate parameter uncertainty, replace the value 0.2 with samples from the posterior
+w <- rbinom( 1e4 , size=9 , prob=samples ) #Using Sen. Hunt's true data of bill passage for 9 bills
+simplehist(w)
+```
+
+
+## Chapter Four
+Linear regression is the geocentric model of applied statistics. By “linear regression,” we will mean a family of simple statistical golems that attempt to learn about the mean and variance of some measurement, using an additive combination of other measurements. Like geocentrism, linear regression can usefully describe a very large variety of natural phenom- ena. Like geocentrism, linear regression is a descriptive model that corresponds to many different process models. If we read its structure too literally, we’re likely to make mistakes. But used wisely, these little linear golems continue to be useful.
+
+
+```{r}
+#random walk, 16 trials, e.g. coin flip. Heads equals forwards one step, tails equals back one step. Normal!
+ pos <- replicate( 1000 , sum( runif(16,-1,1) ) )
+plot(density(pos))
+```
+
+Any process that adds together random values from the same distribution converges to a normal.
+
+```{r}
+# normal by multiplication
+ prod( 1 + runif(12,0,0.1) )
+growth <- replicate( 10000 , prod( 1 + runif(12,0,0.1) ) )
+dens( growth , norm.comp=TRUE )
+```
+small effects that multiply together are approximately additive, and so they also tend to stabilize on Gaussian distributions
+
+
+```{r}
+#logs of large number multiples also converge to normal
+log.big <- replicate(10000 , log(prod(1 +runif(12,0,0.5))))
+dens( log.big , norm.comp=TRUE )
+```
+
+
+Ontological justification. The world is full of Gaussian distributions, approxi- mately. As a mathematical idealization, we’re never going to experience a perfect Gaussian distribution. But it is a widespread pattern, appearing again and again at different scales and in different domains. Measurement errors, variations in growth, and the velocities of molecules all tend towards Gaussian distributions. These processes do this because at their heart, these processes add together fluctuations. And repeatedly adding finite fluctuations results in a distribution of sums that have shed all information about the underlying process, aside from mean and spread.
+
+
+That is to say that the Gaussian distribution is the most natural expression of our state of ignorance, because if all we are willing to assume is that a measure has finite variance, the Gaussian distribution is the shape that can be realized in the largest number of ways and does not introduce any new assumptions. It is the least surprising and least informative assumption to make. 
+
+
+## Definitions
+(1) First, we recognize a set of variables that we wish to understand. Some of these variables are observable. We call these data. Others are unobservable things like rates and averages. We call these parameters.
+(2) For each variable, we define it either in terms of the other variables or in terms of a probability distribution. These definitions make it possible to learn about associ- ations between variables.
+(3) Thecombinationofvariablesandtheirprobabilitydistributionsdefinesajointgen- erative model that can be used both to simulate hypothetical observations as well as analyze real ones.
+
+models as mappings of one set of variables through a probability distribution onto another set of variables. Fundamentally, these models define the ways values of some variables can arise, given values of other variables 
+
+For leg data:
+w = observed count of bills passed
+W ~ Binomial(N, p) #model used in bayes theorem
+p ~ Uniform(0,1) #prior, ~ means stochastic (aka not deterministic)
+
+
+
+The count W is distributed binomially with sample size N and probability p. The prior for p is assumed to be uniform between zero and one.
+
+We know the binomial distribution assumes that each sample (globe toss) is independent of the others, and so we also know that the model assumes that sample points are independent of one another.
+
+## Chapter 4
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+```
+
+
+
+```{r}
+#filter to age over 18
+d2 <- d[ d$age >= 18 , ]
+dens(d2$height)
+```
+
+
+
+```{r}
+#follow along with leg data
+sponsor_record$`1`
+dens(sponsor_record$`1`)
+```
+
+
+```{r}
+#plot priors for height data
+#hsub(i) ~ Normal(mean, std.dev)
+#mean ~Normal (178, 20)
+#std dev ~ Uniform (0,50)
+ curve( dnorm( x , 178 , 20 ) , from=100 , to=250 ) #mean height
+ curve( dunif( x , 0 , 50 ) , from=-10 , to=60 ) #standard deviation prior
+```
+
+
+prior predictive simulations
+Once you’ve chosen priors for h, μ, and σ, these imply a joint prior distribution of individual heights. By simulating from this distribution, you can see what your choices imply about observable height. This helps you diagnose bad choices. Lots of conventional choices are indeed bad ones, and we’ll be able to see this by conducting prior predictive sim- ulations.
+
+
+Sample from prior to test distribution
+
+```{r}
+#distributions of distributions
+sample_mu <- rnorm( 1e4 , 178 , 20 )
+sample_sigma <- runif( 1e4 , 0 , 50 )
+prior_h <- rnorm( 1e4 , sample_mu , sample_sigma )
+dens( prior_h )
+```
+
+
+## Grid approximation of the posterior distribution
+
+```{r}
+#this is laborious and computationally expensive and only used for an example
+mu.list <- seq( from=140, to=160 , length.out=200 )
+sigma.list <- seq( from=4 , to=9 , length.out=200 )
+post <- expand.grid( mu=mu.list , sigma=sigma.list )
+post$LL <- sapply( 1:nrow(post) , function(i) sum( dnorm(
+                d2$height ,
+                mean=post$mu[i] ,
+                sd=post$sigma[i] ,
+                log=TRUE ) ) )
+post$prod <- post$LL + dnorm( post$mu , 178 , 20 , TRUE ) +
+    dunif( post$sigma , 0 , 50 , TRUE )
+post$prob <- exp( post$prod - max(post$prod) )
+
+contour_xyz( post$mu , post$sigma , post$prob )
+
+image_xyz( post$mu , post$sigma , post$prob ) #represents height and std dev
+```
+
+
+Sampling from the posterior
+
+```{r}
+sample.rows <- sample( 1:nrow(post) , size=1e4 , replace=TRUE , #sampling 10000 rows from posterior distribution to get corresponding mean and std dev values, then filtering the corresponding posterior values
+    prob=post$prob )
+sample.mu <- post$mu[ sample.rows ]
+sample.sigma <- post$sigma[ sample.rows ]
+
+plot( sample.mu , sample.sigma , cex=0.5 , pch=16 , col=col.alpha(rangi2,0.1) )
+```
+
+Now that you have these samples, you can describe the distribution of confidence in each combination of μ and σ by summarizing the samples. Think of them like data and describe them, just like in Chapter 3. For example, to characterize the shapes of the marginal posterior densities of μ and σ, all we need to do is:
+The jargon “marginal” here means “averaging over the other parameters.”
+```{r}
+dens( sample.mu )
+dens( sample.sigma )
+```
+
+
+```{r}
+#HPDI
+HPDI( sample.mu )
+HPDI( sample.sigma )
+```
+
+## Posterior Distribution with Quadratic Approximation
+Our interest in quadratic approximation, recall, is as a handy way to quickly make inferences about the shape of the posterior. The posterior’s peak will lie at the maximum a posteriori estimate (MAP), and we can get a useful image of the posterior’s shape by using the quadratic approximation of the posterior distribution at this peak.
+
+
+
+```{r}
+library(rethinking)
+data(Howell1)
+d <- Howell1
+d2 <- d[ d$age >= 18 , ]
+```
+
+hi ∼ Normal(μ, σ)
+μ ∼ Normal(178, 20) 
+σ ∼ Uniform(0, 50)
+height ~ dnorm(mu,sigma)
+    mu ~ dnorm(178,20)
+ sigma ~ dunif(0,50)
+ 
+```{r}
+#make list of above
+flist <- alist(
+    height ~ dnorm( mu , sigma ) ,
+    mu ~ dnorm( 178 , 20 ) ,
+    sigma ~ dunif( 0 , 50 )
+)
+
+#fit model to data
+ m4.1 <- quap( flist , data=d2 )
+ 
+ #examine model
+ precis(m4.1)
+```
+ 
+```{r}
+#changing to a very narrow prior for mean height
+m4.2 <- quap(
+    alist(
+        height ~ dnorm( mu , sigma ) ,
+        mu ~ dnorm( 178 , 0.1 ) ,
+        sigma ~ dunif( 0 , 50 )
+    ) , data=d2 )
+precis( m4.2 )
+```
+
+
+when R constructs a quadratic approximation, it calculates not only standard deviations for all parameters, but also the covariances among all pairs of param- eters. Just like a mean and standard deviation (or its square, a variance) are sufficient to describe a one-dimensional Gaussian distribution, a list of means and a matrix of variances and covariances are sufficient to describe a multi-dimensional Gaussian distribution.
+
+```{r}
+#variance and covariance for m41
+
+vcov( m4.1 ) #variance-covariance matrix
+```
+
+```{r}
+#decomposition of var-covar
+diag( vcov( m4.1 ) ) #list of variances (sqrt to get st dev from precip)
+cov2cor( vcov( m4.1 ) ) #relation of mean to st dev
+```
+
+
+```{r}
+#drawing samples from the multidemensional posterior
+library(rethinking)
+post <- extract.samples( m4.1 , n=1e4 )
+head(post)
+precis(post) #compare to...
+precis(m4.1)
+```
+
+once you add a predictor variable to your model, covariance will matter a lot.
+
+### Adding a predictor
+What we’ve done above is a Gaussian model of height in a population of adults. But it doesn’t really have the usual feel of “regression” to it. Typically, we are interested in modeling how an outcome is related to some predictor variable. And by including a predictor variable in a particular way, we’ll have linear regression.
+So now let’s look at how height in these Kalahari foragers covaries with weight. This isn’t the most thrilling scientific question, I know. But it is an easy relationship to start with, and if it seems dull, it’s because you don’t have a theory about growth and life history in mind. If you did, it would be thrilling. We’ll try later on to add some of that thrill.
+
+
+
+```{r}
+plot( d2$height ~ d2$weight )
+```
+
+
+
+### Linear Model
+
+hi ∼ Normal(μi, σ)  [likelihood]
+μi = α + β(xi −  ̄x)[linear model]
+α ∼ Normal(178, 20)  [α prior]
+β ∼ Normal(0, 10) [β prior]
+σ ∼ Uniform(0, 50)   [σ prior]
+ 
+The value xi is just the weight value on row i. It refers to the same individual as the height value, hi, on the same row. The parameters α and β are more mysterious. Where did they come from? We made them up. The parameters μ and σ are necessary and sufficient to describe a Gaussian distribution. But α and β are instead devices we invent for manipulating μ, allowing it to vary systematically across cases in the data.
+
+alpha is intercept, beta is slope
+
+
+The prior for β deserves explanation. Why have a Gaussian prior with mean zero? This prior places just as much probability below zero as it does above zero, and when β = 0, weight has no relationship to height. To figure out what this prior implies, let’s simulate— the prior predictive simulation. There is no other way to understand.
+The goal is to simulate observed heights from the model. First, let’s consider a range of weight values to simulate over. The range of observed weights will do fine. Then we need to simulate a bunch of lines, the lines implied by the priors for α and β. Here’s how to do it, setting a seed so you can reproduce it exactly:
+
+```{r}
+set.seed(2971)
+N <- 100                   # 100 lines
+a <- rnorm( N , 178 , 20 )
+b <- rnorm( N , 0 , 10 )
+
+plot( NULL , xlim=range(d2$weight) , ylim=c(-100,400) ,
+    xlab="weight" , ylab="height" )
+abline( h=0 , lty=2 )
+abline( h=272 , lty=1 , lwd=0.5 )
+mtext( "b ~ dnorm(0,10)" )
+xbar <- mean(d2$weight)
+for ( i in 1:N ) curve( a[i] + b[i]*(x - xbar) ,
+    from=min(d2$weight) , to=max(d2$weight) , add=TRUE ,
+    col=col.alpha("black",0.2) )
+```
+
+
+For reference, I’ve added a dashed line at zero—no one is shorter than zero—and the “Wadlow” line at 272cm for the world’s tallest person. The pattern doesn’t look like any human population at all. It essentially says that the relationship between weight and height could be absurdly positive or negative. Before we’ve even seen the data, this is a bad model. Can we do better?
+We can do better immediately. We know that average height increases with average weight, at least up to a point. Let’s try restricting it to positive values. The easiest way to do this is to define the prior as Log-Normal instead. If you aren’t accustomed to playing with logarithms, that’s okay. I’ll show each step, and there’s some more detail in the box further down.
+
+
+
+```{r}
+set.seed(2971)
+N <- 100
+a <- rnorm( N , 178 , 20 )
+b <- rlnorm( N , 0 , 1 )
+
+plot( NULL , xlim=range(d2$weight) , ylim=c(-100,400) ,
+    xlab="weight" , ylab="height" )
+abline( h=0 , lty=2 )
+abline( h=272 , lty=1 , lwd=0.5 )
+mtext( "b ~ dnorm(0,10)" )
+xbar <- mean(d2$weight)
+for ( i in 1:N ) curve( a[i] + b[i]*(x - xbar) ,
+    from=min(d2$weight) , to=max(d2$weight) , add=TRUE ,
+    col=col.alpha("black",0.2) )
+```
+
+
+hi ∼ Normal(μi, σ)    height ~ dnorm(mu,sigma)
+μi =α+β(xi − ̄x)       mu<-a+b*weight
+α ∼ Normal(178, 20)   a ~ dnorm(178,20)
+β ∼ Log-Normal(0, 1)  b ~ dlnorm(0,1)
+σ ∼ Uniform(0, 50)    sigma ~ dunif(0,50)
+
+
+```{r}
+# load data again, since it's a long way back
+library(rethinking)
+data(Howell1)
+d <- Howell1
+d2 <- d[ d$age >= 18 , ]
+# define the average weight, x-bar
+xbar <- mean(d2$weight)
+# fit model
+m4.3 <- quap(
+    alist(
+        height ~ dnorm( mu , sigma ) ,
+        mu <- a + b*( weight - xbar ) ,
+        a ~ dnorm( 178 , 20 ) ,
+        b ~ dlnorm( 0 , 1 ) ,
+        sigma ~ dunif( 0 , 50 )
+), data=d2 )
+
+precis(m4.3)
+```
+  b = a person 1 kg heavier is expected to be .90 cm taller. If you are committed to lines, then lines witha slope around .9 are plausible
+    
+    
+  EVERYTHING THAT DEPENDS UPON PARAMETERS HAS A POSTERIOR DISTRIBUTION  
+Posterior probabilities of parameter values describe the relative compatibility of different states of the world with the data, ac- cording to the model.
+
+```{r}
+#variance-covariance
+ round( vcov( m4.3 ) , 3 )
+pairs(m4.3)
+```
+
+
+### Plotting posterior inference against the data
+
+```{r}
+plot( height ~ weight , data=d2 , col=rangi2 )
+post <- extract.samples( m4.3 )
+a_map <- mean(post$a)
+b_map <- mean(post$b)
+curve( a_map + b_map*(x - xbar) , add=TRUE )
+```
+
+
+
+the posterior distribution considers every possible regression line connecting height to weight. It assigns a relative plausibility to each. This means that each combination of α and β has a posterior probability
+
+```{r}
+#sample of other plausible lines
+post <- extract.samples( m4.3 )
+post[1:5,]
+```
+
+
+```{r}
+#re estimate the model with just the first 10 lines
+N <- 10
+dN <- d2[ 1:N , ]
+mN <- quap(
+    alist(
+        height ~ dnorm( mu , sigma ) ,
+        mu <- a + b*( weight - mean(weight) ) ,
+        a ~ dnorm( 178 , 20 ) ,
+        b ~ dlnorm( 0 , 1 ) ,
+        sigma ~ dunif( 0 , 50 )
+) , data=dN )
+
+
+# extract 20 samples from the posterior
+post <- extract.samples( mN , n=20 )
+# display raw data and sample size
+plot( dN$weight , dN$height ,
+    xlim=range(d2$weight) , ylim=range(d2$height) ,
+    col=rangi2 , xlab="weight" , ylab="height" )
+mtext(concat("N = ",N))
+# plot the lines, with transparency
+for ( i in 1:20 )
+    curve( post$a[i] + post$b[i]*(x-mean(dN$weight)) , col=col.alpha("black",0.3) , add=TRUE )
+
+```
+
+### Plotting regresion intervals and contours
+
+
+Can be more valuable to show spread around average regression line
+
+```{r}
+#for example, here is how to find height for someone weighing 50kgs
+post <- extract.samples( m4.3 )
+mu_at_50 <- post$a + post$b * ( 50 - xbar )
+```
+
+
+
+```{r}
+#here is how to do it for every data point
+mu <- link( m4.3 )
+str(mu)
+```
+
+```{r}
+# define sequence of weights to compute predictions for
+# these values will be on the horizontal axis
+weight.seq <- seq( from=25 , to=70 , by=1 )
+# use link to compute mu
+# for each sample from posterior
+# and for each weight in weight.seq
+mu <- link( m4.3 , data=data.frame(weight=weight.seq) )
+str(mu)
+```
+
+
+```{r}
+ # use type="n" to hide raw data
+plot( height ~ weight , d2 , type="n" )
+# loop over samples and plot each mu value
+       for ( i in 1:100 )
+           points( weight.seq , mu[i,] , pch=16 , col=col.alpha(rangi2,0.1) )
+```
+
+```{r}
+# summarize the distribution of mu
+mu.mean <- apply( mu , 2 , mean )
+mu.HPDI <- apply( mu , 2 , HPDI , prob=0.89 )
+
+# plot raw data
+# fading out points to make line and interval more visible
+plot( height ~ weight , data=d2 , col=col.alpha(rangi2,0.5) )
+# plot the MAP line, aka the mean mu for each weight
+lines( weight.seq , mu.mean )
+# plot a shaded region for 89% HPDI
+shade( mu.HPDI , weight.seq )
+```
+
+
+
+
+
+
+#Irresponsibly skipping ahead to ch. 9
+
+
+
+```{r}
+#good king markov's travels
+num_weeks <- 1e5
+positions <- rep(0,num_weeks)
+current <- 10
+for ( i in 1:num_weeks ) {
+    # record current position
+    positions[i] <- current
+    # flip coin to generate proposal
+    proposal <- current + sample( c(-1,1) , size=1 )
+    # now make sure he loops around the archipelago
+    if ( proposal < 1 ) proposal <- 10
+    if ( proposal > 10 ) proposal <- 1
+    # move?
+    prob_move <- proposal/current
+    current <- ifelse( runif(1) < prob_move , proposal , current )
+}
+```
+
+the king moves, if this random number is less than the ratio of the proposal island’s population to the current island’s population (proposal/current).
+
+
+The high correlation example illustrates the problem. But the actual problem is more severe and more interesting. Any Markov chain approach that samples individual parameters in individual steps is going to get stuck, once the number of parameters grows sufficiently large. The reason goes by the name concentration of measure. This is an awkward name for the amazing fact that most of the probability mass of a high-dimension distribution is always very far from the mode of the distribution. It is hard to visualize. We can’t see in 100 dimensions, on most days. But if we think about the 2D and 3D versions, we can understand the basic phenomenon. In two dimensions, a Gaussian distribution is a hill. The highest point is in the middle, at the mode. But if we imagine this hill is filled with dirt—what else are hills filled with?—then we can ask: Where is most of the dirt? As we move away from the peak in any direction, the altitude declines, so there is less dirt directly under our feet. But in the ring around the hill at the same distance, there is more dirt than there is at the peak. The area increases as we move away from the peak, even though the height goes down. So the total dirt, um probability, increases as we move away from the peak. Eventually the total dirt (probability) declines again, as the hill slopes down to zero. So at some radial distance from the peak, dirt (probability mass) is maximized. In three dimensions, it isn’t a hill, but now a fuzzy sphere. The sphere is densest at the core, its “peak.” But again the volume increases as we move away from the core. And so there is more total sphere-stuff in a shell around the core.
+
+
+
+
+### Terrain ruggedness example from chapter seven
+
+```{r}
+library(rethinking)
+data(rugged)
+d <- rugged
+d$log_gdp <- log(d$rgdppc_2000)
+dd <- d[ complete.cases(d$rgdppc_2000) , ]
+dd$log_gdp_std <- dd$log_gdp / mean(dd$log_gdp)
+dd$rugged_std <- dd$rugged / max(dd$rugged)
+dd$cid <- ifelse( dd$cont_africa==1 , 1 , 2 )
+
+
+#old way with quap
+
+m8.5 <- quap(
+    alist(
+        log_gdp_std ~ dnorm( mu , sigma ) ,
+        mu <- a[cid] + b[cid]*( rugged_std - 0.215 ) ,
+        a[cid] ~ dnorm( 1 , 0.1 ) ,
+        b[cid] ~ dnorm( 0 , 0.3 ) ,
+        sigma ~ dexp( 1 )
+),
+    data=dd )
+precis( m8.5 , depth=2 )
+```
+
+
+
+
+```{r}
+# replicating in HMC
+#data slimmed, pretransformed, extra stuff removed
+dat_slim <- list(
+    log_gpd_std = dd$log_gdp_std,
+    rugged_std = dd$rugged_std,
+    cid = as.integer( dd$cid )
+)
+str(dat_slim)
+
+```
+
+```{r}
+m9.1 <- ulam(
+    alist(
+        log_gdp_std ~ dnorm( mu , sigma ) ,
+        mu <- a[cid] + b[cid]*( rugged_std - 0.215 ) ,
+        a[cid] ~ dnorm( 1 , 0.1 ) ,
+        b[cid] ~ dnorm( 0 , 0.3 ) ,
+        sigma ~ dexp( 1 )
+),
+data=dat_slim , chains=4 , cores=4 , iter=1000 )
+```
+
+```{r}
+precis(m9.1, depth = 2)
+```
+
+
+
+#GLMS
+Entropy: Events that can happen more ways are more likely
+
+for leg data: poisson distribution
+
+link functions:
+map the linear space of a model onto the non-linear space of a parameter, usually logit link or log link
+
+# Ch. 11 Applied GLMs
+logistic regression: data organized into single-trial cases, outcome either 1 or 0
+Aggregated binomial regression: individual trials with same covariate values are aggregated together
+
+
+for leg data: Aggregated binomial regression
+
+Since the outcome counts are just 0 or 1, you might see the same type of model defined using a Bernoulli distribution:
+Li ∼ Bernoulli(pi)
+
+A flat prior in the logit space is not a flat prior in the outcome probability space. 
+
+In the analysis above, I mostly focused on changes in predictions on the outcome scale—how much difference does the treatment make in the probability of pulling a lever? This view of posterior prediction focuses on absolute effects, the difference a counter-factual change in a variable might make on an absolute scale of measurement, like the probability of an event.
+It is more common to see logistic regressions interpreted through relative effects. Relative effects are proportional changes in the odds of an outcome. If we change a variable and say the odds of an outcome double, then we are discussing relative effects. You can calcu- late these proportional odds relative effect sizes by simply exponentiating the parameter of interest. For example, to calculate the proportional odds of switching from treatment 2 to treatment 4 (adding a partner):
+
+
+```{r}
+#leg example
+sponsor_record <- sponsor_record %>% 
+  mutate(Party = replace(Party, Party == "D", 1), #D = 1, R = 2
+                                            Party = replace(Party, Party == "R", 2),
+                                            Party = as.numeric(Party)) %>%
+  rename("passed" = `1`,
+         "notpassed" = `0`)
+  
+
+#model bill passed as a function of party
+m.bills <- quap(
+  alist(
+    passed ~ dbinom(tot_bills, p),
+    logit(p) <- a[Party],
+    a[Party] ~ dnorm(0, 1.5)
+  ) , data = sponsor_record )
+precis(m.bills, depth = 2 )
+    
+
+```
+
+higher mean for d's then r's, more sd with r's
+
+```{r}
+#results on logit scale and outcome scale
+post <- extract.samples(m.bills)
+diff_a <- post$a[,1] - post$a[,2]
+diff_p <- inv_logit(post$a[,1]) - inv_logit(post$a[,2])
+precis( list( diff_a=diff_a , diff_p=diff_p ) )
+```
+
+
+log-odds difference is postive, corresponding to higher bills passed by D's. On the probability scale, the difference is somewhere between 5 and 10% more likely to have bill passed
+
+
+
+```{r}
+#posterior prediction check
+postcheck( m.bills , n=1e4 )
+# draw lines connecting points from same dept. Doesn't work
+sponsor_record$original_sponsor_id <- rep( 1:72 , each=2 )
+for ( i in 1:6 ) {
+    x <- 1 + 2*(i-1)
+    y1 <- sponsor_record$passed[x]/sponsor_record$tot_bills[x]
+    y2 <- sponsor_record$passed[x+1]/sponsor_record$tot_bills[x+1]
+    lines( c(x,x+1) , c(y1,y2) , col=rangi2 , lwd=2 )
+    text( x+0.5 , (y1+y2)/2 + 0.05 , sponsor_record$original_sponsor[x] , cex=0.8 , col=rangi2 )
+}
+
+
+
+
+
+```
+
+
+#Poisson version
+
+N is unknown or uncountably large.
+
+Poisson only has one parameter λ  which is the expected value of the outcome y. 
+yi ∼ Poisson(λi) 
+log(λi) = α + β(xi −  ̄x)
+
+
+
+
+
+
+

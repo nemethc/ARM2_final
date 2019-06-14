@@ -1,0 +1,332 @@
+---
+title: "A Bayesian Approach to Legislator Efficiency"
+author: |
+  | Corban Nemeth 
+  | The Evergreen State College
+header-includes: |
+    \usepackage{fancyhdr}
+    \pagestyle{fancy}
+    \fancyhead[CO,CE]{A Bayesian Approach to Legislator Efficiency}
+output:
+  html_notebook:
+    toc: true
+    toc_float: true
+    theme: cosmo
+    highlight: tango
+---
+
+
+
+# Introduction
+
+Washington State's legislative session recently concluded. The Democrats, who for the second year in a row controlled both the House and the Senate, celebrated success with the passage of signature legislation such as a raise in the smoking age, a public option for health insurance, and environmental protections. However, landmark legislation doesn't tell the whole story. Republicans, now in the minority, introduced and passed bills as well. For this analysis, I looked at techniques for comparing legislator efficiency, both within and across party lines and for individual legislators. I present a variety of techniques for ranking legislative performance, obtaining point estimates, and developing predictive models for individual legislators. Additionally, quadratic approximation and Markov Chain Monte Carlo (MCMC) regression procedures are used to analyze the difference in bill passing between political parties.  
+
+
+# Background
+
+I compiled data for this analysis from the [Washington State Legislature's public website](www.leg.wa.gov). I gathered summary data on all bills introduced in the 2019 session. The most important information included the bill's prime sponsor and whether or not the bill passed, which was calculated based on the bill's final status. In the data, `billpassed == 1` corresponds to a passed bill. I also manually entered individual legislator's party affiliation from the Legislative website into a separate CSV file. `Party == 1` corresponds to Democrats, and `Party == 2` corresponds to Republicans.
+
+```{r message = FALSE, warning = FALSE}
+library(here)
+library(tidyverse)
+library(DT)
+library(rethinking)
+bill_data <- read_csv(here("data/session_data.csv"))
+party_data <- read_csv(here("data/leg_rosters.csv"))
+
+bill_data <- bill_data %>%
+  separate(Bill, c("prefix", "bill_number"), sep = " ") %>% #seperate e.g. HB 1065 into components
+  mutate(billpassed = if_else(Status == "Del to Gov" | startsWith(Status, "C"), 1 , 0)) %>% #filter for bills that passed, 1 = passed
+  rename(original_sponsor = `Original Sponsor`) %>% 
+  distinct() %>% #removes house of origin duplicates
+  left_join(party_data, by = c("original_sponsor" = "Member Name")) %>% #join by party affiliation
+  mutate(Party = replace(Party, Party == "D", 1), #D = 1, R = 2
+                                            Party = replace(Party, Party == "R", 2),
+                                            Party = as.numeric(Party)) %>% #1 for Ds, 2 for Rs
+  select(bill_number, Status, Title,original_sponsor, billpassed, Party) %>% 
+  filter(`original_sponsor` != "People of the State of Washington")  #not including initiatives, sorry Tim Eyman
+
+datatable((bill_data))
+```
+
+Next, I took the data and summarized it by individual sponsor. Later on, this will allow me to perform aggregated binomial regression, but we can put that aside for now. 
+
+```{r message = FALSE, warning = FALSE}
+sponsor_record <- bill_data %>% #Get bill counts by legislator
+  count(original_sponsor, billpassed, Party) %>% 
+  spread(billpassed, n) %>% 
+  mutate(`1` = replace_na(`1`, 0),
+         `0` = replace_na(`0`, 0),
+         tot_bills = `1` + `0`,
+         pct_passed = `1` / (tot_bills)) %>% 
+  rename(passed = `1`,
+         notpassed = `0`)
+datatable(sponsor_record) %>% 
+  formatPercentage("pct_passed")
+```
+
+
+
+# Analysis
+
+## Empirical Bayes Shrinkage
+
+The first question I wanted to be able to answer is to be able to rank legislator performance from most effective to least. This may seem trivial at first glance, but gets more complicated as one considers the nature of the legislature. For example, is a legislator who passes 3 bills out of 30 introduced more effective than one who passes 3 bills of 5 introduced? And furthermore, is a legislator who passes 1 bill out of 4 introduced as effective as one who passes 10 bills out of 40 introduced? I use empirical Bayes shrinkage to estimate the "true" probability of passing for each legislator based on an informed prior. The prior in this situation is the overall average percentage of passing a bill for the entire legislature. 
+
+Without any adjustment, here is a plot of bills passed against bills that failed to passed.
+
+```{r message = FALSE, warning = FALSE}
+library(hrbrthemes)
+library(plotly)
+billsgraph <- ggplot(sponsor_record, aes(x = passed, y = notpassed, color = as.factor(Party), label = original_sponsor))+
+  geom_jitter() +
+  labs(title = "Overall Bill Passage",
+       y = "Bills not passing",
+       x = "Bills passing") +
+  theme_ipsum_rc() +
+  scale_color_manual(breaks = c("D", "R"),
+                        values=c("blue", "red")) +
+  geom_smooth(data = subset(sponsor_record, Party == "1")) +
+  geom_smooth(data = subset(sponsor_record, Party == "2")) 
+  
+
+ggplotly(billsgraph)
+
+```
+
+From this, it looks like overall, Democrats may pass more bills but differences among individual legislators are unclear where the total number of bills is low. 
+
+In order to get a more complete picture, we can shrink the data towards the prior of overall average. Here's a histogram of the overall percent of bills passed by legislators. This could be analogous to a "legislator batting average."
+
+```{r message = FALSE, warning=FALSE}
+#prior estimation
+dens(sponsor_record$pct_passed)
+```
+
+Based on our distribution, we can develop estimates of alpha and beta based on the technique outlined in *Introduction to Empirical Bayes* by David Robinson. 
+
+```{r message = FALSE, warning = FALSE}
+library(stats4)
+library(VGAM)
+# log-likelihood function
+ll <- function(alpha, beta) {
+x <- sponsor_record$passed
+total <- sponsor_record$tot_bills
+-sum(VGAM::dbetabinom.ab(x, total, alpha, beta, log = TRUE))
+}
+
+# maximum likelihood estimation
+m <- mle(ll, start = list(alpha = 1, beta = 10), method = "L-BFGS-B", lower = c(0.0001, .1))
+ab <- coef(m) 
+alpha0 <- ab[1]
+beta0 <- ab[2]
+
+z <- seq(0,1,length=21)
+beta_dist <- data.frame(cbind(z, dbeta(z,alpha0,beta0)))
+colnames(beta_dist) <- c("x", "value")
+
+#calculate and collect EB estimates
+bills_eb <- sponsor_record %>%
+mutate(eb_estimate = (passed + alpha0) / (tot_bills + alpha0 + beta0),
+       delta = pct_passed-eb_estimate) %>% 
+  arrange(eb_estimate) %>% 
+  mutate(original_sponsor = as.factor(original_sponsor))
+
+datatable(bills_eb) %>% 
+  formatPercentage(c("pct_passed", "eb_estimate", "delta"))
+
+```
+
+Here is the output from the analysis. The new column `eb_estimate` represents the empirical Bayes estimate of bill passage percent, shrunk towards the overall mean. The `delta` column shows the difference from the observed `pct_passed` to the `eb_estimate`. Below is a plot that shows the shrinkage by party. 
+
+```{r}
+
+g3 <- ggplot(bills_eb, aes(x = pct_passed, y = eb_estimate, label = original_sponsor, label2 = passed, label3 = notpassed, color = tot_bills, shape = as.factor(Party))) +
+  geom_point() +
+  scale_color_viridis_c(name = "Total Bills Introduced") +
+  scale_y_continuous(labels = scales::percent) +
+  scale_x_continuous(labels = scales::percent) +
+  labs(title = "Overall Bill Passage",
+       y = "Bayesian estimate",
+       x = "Observed percentage of bills passed") +
+  geom_abline(intercept = 0, slope = 1, color = "lightgray", alpha = .5) +
+  theme_ipsum_rc()
+  
+
+g1 <- ggplotly(g3)
+
+ggplotly(g1)
+```
+
+The line running through the chart represents the area where the observed passage of bills is equal to the Bayesian estimate. One can observe that the more bills a legislator introduced, the closer they tend to be to the line. This shows that they are not being affected as much by the prior, because they have more data in favor of their observed position. On the other hand, those with few bills introduced are more likely to be impacted by the prior specification because they have less observed data. Due to the partisan composition of Washington's legislature, democrats tended to have more bills passed and thus are less affected by the empirical Bayes shrinkage. 
+
+##Sampling from Priors and Posteriors
+### Distribution Estimates
+In this section, I will isolate one legislator for the purposes of demonstrating how parameters can be sampled from prior and posterior distributions. I will use Senator Hunt for these examples. 
+
+To begin, I create a Bayesian framework for updating a prior against a posterior using grid approximation (See *Statistical Rethinking* page 52). Below, I use grid approximation, a uniform prior, and take 1000 samples after computing the posterior likelihood distribution of Senator Hunt's true bill passing percentage. 
+
+```{r warning = FALSE, message = FALSE}
+#for one sample legislator, Senator Hunt
+huntbills <- sponsor_record %>% 
+  filter(original_sponsor == "Hunt")
+
+
+passed <- sum(huntbills$passed)
+totbills <- sum(huntbills$tot_bills)
+
+p_grid <- seq( from=0 , to=1 , length.out=1000 ) #grid approximation
+prob_p <- rep( 1 , 1000 ) #uniform prior
+prob_data <- dbinom( passed , size=totbills , prob=p_grid ) #probability of the data
+posterior <- prob_data * prob_p #calculate the posterior
+posterior <- posterior / sum(posterior) #normalize to 1
+
+plot( p_grid , posterior , type="b" ,
+    xlab="probability of bill passing" , ylab="posterior probability" )
+
+
+```
+Once the posterior probabilities of Senator Hunt's bill passage have been established, the posterior can be sampled to generate summary statistics. I will draw 10,000 samples from the posterior to generate a density estimate. 
+
+```{r}
+#Sampling from the posterior
+samples <- sample( p_grid , prob=posterior , size=1e4 , replace=TRUE )
+plot(samples)
+dens( samples ) #fn from rethinking
+```
+
+Samples can also be used to summarize the posterior distribution. Somewhat analogous to a confidence interval, a percentile interval (PI) assign equal probability mass to each tail. 
+
+```{r}
+ PI( samples , prob=0.5 )
+```
+In this case, we can see that 25% of the posterior probability samples are below 13%, and 25% are above 21% of bills passing. 
+
+
+Data can also be sampled using highest posterior density interval (HPDI). The HPDI represents the narrowest band of the distribution that contains the target probability mass, e.g. 50%
+
+```{r}
+HPDI(samples, prob = 0.90)
+```
+In this case, 90% of the samples lie between 7% and 26%, and because it is the narrowest, it best represents the parameter values by including the densest parts of the posterior distribution. 
+
+### Point Estimates
+Point estimates can also be obtained using Bayesian procedures. The *maximum a posteriori* (MAP) estimate is the point that is most likely under the posterior probability. This is also the mode of the posterior distribution. 
+```{r}
+p_grid[ which.max(posterior) ]
+```
+The most likely estimate for Senator Hunt's bill passing percentage is 15%. 
+
+### Predictions
+
+Bayesian models are generative and allow for probabilistic predictions generated using a posterior sample. In this case, I can make predictions on the percentage of Senator Hunt's bills that will pass given the dummy data generated. 
+
+The following simulates data for 2 introduced bills, with a true probability of bill passage = 0.2, near the mean of the overall bill data.
+
+```{r}
+#dummy data
+ dbinom( 0:2 , size=2 , prob=0.2 ) 
+```
+
+This means that with 2 trials, there is a 64% chance of none of the bills passing, a 32% chance of 1 bill passing, and a 4% chance of both bills passing, given the true probability is 20%. This is a helpful metric to gauge relative success. 
+
+We can also incorporate parameter uncertainty into our predictive models. Senator Hunt's true percentage of passing bills may indeed be exactly 20%, as assumed above. However, it is more likely that his newly introduced bills will pass proportional to his already established posterior bill passing distribution. In this case, I'll replace the 20% probability above with the samples generated from the grid approximation of the posterior bill passing distribution. 
+
+```{r}
+#to propogate parameter uncertainty, replace the value 0.2 with samples from the posterior
+w <- rbinom( 1e4 , size=10 , prob=samples ) #Using Sen. Hunt's true data of bill passage for 10 bills
+simplehist(w)
+```
+This example shows the models expectations for how many bill of Senator Hunt will pass if he introduces 10 bills, repeated 10,000 times. We can see that out of 10,000 trials, the most frequent outcome is a single bill passed, gradually diminishing to 7. These posterior estimates are generated from Senator Hunt's individual likelihood of bills passing. 
+
+
+## Bayesian Regression Analysis 
+
+### Aggregated Binomial Regression using Quadriatic Approximation
+
+Bills either passed in the 2019 session or they did not pass. Because of this, we can model bill passage by legislator by party with a aggregated binomial regression, where each individual trial (bill) is aggregated to sponsor. This also allows us to compare across legislators with different numbers of introduced bills. 
+
+The following procedure utilizes quadratic approximation to model the distribution of bills passed. The quadratic approximation function looks to emulate the shape of the top of the distribution curve with a quadratic function to generate a posterior distribution. A uninformed normal prior is used for parameters. 
+
+
+```{r warning = FALSE, message = FALSE}
+library(rethinking)
+#model bill passed as a function of party
+m.bills <- quap(
+  alist(
+    passed ~ dbinom(tot_bills, p),
+    logit(p) <- a[Party],
+    a[Party] ~ dnorm(0, 1.5)
+  ) , data = sponsor_record )
+precis(m.bills, depth = 2 ) #generate summary statistics
+    
+
+```
+Here, a[1] represents Democrats and a[2] represents Republicans. The mean estimates of bill passage is higher for Democrats, which is expected. We also see that there is more variation in the proportion of bills passed for Republicans. 
+
+
+
+```{r warning = FALSE, echo = FALSE}
+#results on logit scale and outcome scale
+post <- extract.samples(m.bills)
+diff_a <- post$a[,1] - post$a[,2]
+diff_p <- inv_logit(post$a[,1]) - inv_logit(post$a[,2])
+precis( list( diff_a=diff_a , diff_p=diff_p ) )
+```
+
+A logit link function was used in the initial quadratic approximation. This allows for easily understandable comparison statements to be used to summarize effects in the parameter. Above, `Diff A` is log-odds comparison that communicates relative effects. In other words, Democrats odds are about 50% more likely to pass a given introduced bill. However, this doesn't communicate the overall magnitude of the effect given the base rate of bill passing. `Diff P` is on the outcome scale. This can be interpreted as being a Republican leads to about an 8% reduction in overall bill passage, from about 20% overall for Democrats to about 12% overall for Republicans.
+
+
+## Utilizing Poisson Distribution and STAN MCMC Analysis
+
+A Poisson MCMC model can also be used to model overall bill passage, regardless of party. Instead of looking at the binomial outcome of total bills compared to bills passed, the Poisson model looks at the distribution of bills passed and bills not passed indivudally. Poisson models are simpler to describe than the binomial model, becuase the there is only one shape parameter, λ. λ represents the expected value of the outcome, and also the expected variance of the counts `y`. The `stan` model described below shows that with a normal prior for λ, the model converges to equivalence with the binomial quadratic approximation above. The output of this model shows a mean bill passage of approximately 18% across the population. 
+
+```{r}
+#redoing above as multinomial as Poisson
+m_pois <- map2stan(
+  alist(
+    passed ~ dpois(lambda1),
+    notpassed ~ dpois(lambda2),
+    log(lambda1) <- a1,
+    log(lambda2) <- a2,
+    c(a1, a2) ~ ?dnorm(0, 100)
+  ),
+  data = sponsor_record, chains = 3, cores = 3)
+```
+
+
+```{r}
+#poisson model coefficients
+k <- as.numeric(coef(m_pois))
+exp(k[1])/(exp(k[1])+exp(k[2]))
+```
+
+The end result is the same, with an overall parameter of bill passage percent equal to 18%. 
+
+#Results and Key Findings
+
+The Bayesian approaches to evaluating legislator effectiveness document above provide several insights. First, ranking legislators by their percentage of bills passed alone is misleading. Such a model would rank someone with 1 bill introduced and 1 bill passed above a legislator with 15 bills introduced and 20 bills passed. By establishing an informed prior over the whole population, group wise comparisons can be made that adjust the strength of the estimate based on Bayesian principles. This results in a more accurate comparison of legislative effectiveness. 
+
+Secondly, individual legislator performance can be quantified and predicted using Bayesian grid approximation and posterior sampling. In the data, Senator Hunt passed 6 bills of 39 introduced. Without knowing anything about the content of the bill, what number of future bills passing can we expect given a probabilistic range of outcomes? In the example, I showed the resulting distribution of 10,000 scenarios of 10 introduced bills. 
+
+Additionally, Bayesian regression analysis can be performed to compare legislative performance across party lines. This can be accomplished using two procedures: Quadratic approximation and Poisson MCMC. The quadriatic approxmition, using the logit link, showed that Republicans are about half as likely to have a bill pass as Democrats. The absolute odds comparison shows that overall, Republicans bill passage percent is about 8% lower than Democrats. The Poisson MCMC regression showed that the overall proportion of bills passing is approximately 18%, given a normal prior for λ. 
+
+
+
+#Conclusion
+
+It is apparent that a Bayesian approach can generate valuable insights into public policy processes. Overall, using informed priors allows more accurate comparsions to be made. Sampling and Bayesian regression allow for flexible modeling of both individual and group wise legislator effectiveness. More interesting and nuanced models could be developed in the future that could take into account tenure, committee membership, and partisanship. There are many interesting Bayesian models of legislator partisanship such as [dw-nominate](https://voteview.com/about) that would be fascinating to apply on a local and state government level. The models presented in this analysis are simplistic, but represent an academic quarter's worth of Bayesian principles and practices. Ultimately, the simpler models can present stronger inferences as long as the takeaways are presented as inference, not fact. I look forward to utilizing more Bayesian principles in further research in the Evergreen MPA program. 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
